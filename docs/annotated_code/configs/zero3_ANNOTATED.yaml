@@ -1,0 +1,316 @@
+# ==============================================================================
+# FILE: recipes/accelerate_configs/zero3.yaml
+# CATEGORY: Configuration - DeepSpeed ZeRO-3 Distributed Training
+# PRIORITY: HIGH
+# LINES: 23
+# DEPENDENCIES:
+#     - HuggingFace Accelerate: Distributed training framework
+#     - DeepSpeed: Optimization library for large model training
+#     - PyTorch: Deep learning framework
+# ==============================================================================
+#
+# OVERVIEW:
+# This configuration file defines DeepSpeed ZeRO-3 settings for distributed
+# training across multiple GPUs. ZeRO-3 (Zero Redundancy Optimizer Stage 3)
+# partitions model parameters, gradients, and optimizer states across GPUs
+# to enable training larger models.
+#
+# ROLE IN DEEPSEEK R1:
+# - Enables training 7B+ models on multi-GPU setups
+# - Reduces memory usage per GPU via parameter sharding
+# - Used for SFT and GRPO training stages
+# - Alternative to FSDP (Fully Sharded Data Parallel)
+#
+# DEEPSPEED ZERO STAGES:
+# - ZeRO-1: Partition optimizer states only
+# - ZeRO-2: Partition optimizer states + gradients
+# - ZeRO-3: Partition optimizer states + gradients + parameters
+#
+# ZERO-3 MEMORY SAVINGS:
+# - Without ZeRO: Each GPU stores full model
+# - With ZeRO-3: Each GPU stores 1/N of model (N = num GPUs)
+# - Example: 7B model on 8 GPUs
+#   - No ZeRO: 14 GB per GPU (BF16)
+#   - ZeRO-3: ~2 GB per GPU (14 GB / 8 GPUs)
+#
+# DATA FLOW:
+# Config file → accelerate launch → DeepSpeed engine
+#     → Distributed training → Checkpoints
+#
+# USAGE:
+# accelerate launch --config_file recipes/accelerate_configs/zero3.yaml \
+#     scripts/sft.py --config recipes/config_distill.yaml
+# ==============================================================================
+
+compute_environment: LOCAL_MACHINE
+# WHAT: Specifies compute environment type
+# WHY: LOCAL_MACHINE = training on local cluster/workstation
+#      (as opposed to cloud/SageMaker/etc.)
+# OPTIONS:
+#   - LOCAL_MACHINE: Local cluster or workstation
+#   - AMAZON_SAGEMAKER: AWS SageMaker
+#   - GCP: Google Cloud Platform
+
+debug: false
+# WHAT: Disable debug mode
+# WHY: Debug mode adds overhead and verbose logging
+#      Only enable for troubleshooting
+# DEBUG MODE:
+#   - Synchronizes CUDA operations (slower)
+#   - Adds detailed logging
+#   - Enables error checking
+
+# ==============================================================================
+# DEEPSPEED CONFIGURATION
+# ==============================================================================
+
+deepspeed_config:
+  deepspeed_multinode_launcher: standard
+  # WHAT: Launcher for multi-node training
+  # WHY: "standard" uses default launcher (pdsh or similar)
+  #      Required for multi-node setups (not used here with num_machines=1)
+  # OPTIONS:
+  #   - standard: Default launcher
+  #   - openmpi: OpenMPI mpirun
+  #   - mvapich: MVAPICH mpirun
+  #   - slurm: Slurm srun
+
+  offload_optimizer_device: none
+  # WHAT: Don't offload optimizer states to CPU
+  # WHY: Offloading saves GPU memory but slows training
+  #      With ZeRO-3 + 8 GPUs, no offloading needed for 7B models
+  # OPTIONS:
+  #   - none: Keep optimizer on GPU (fast)
+  #   - cpu: Offload to CPU (saves memory, slower)
+  #   - nvme: Offload to NVMe SSD (saves more memory, very slow)
+  # WHEN TO OFFLOAD:
+  #   - Very large models (70B+)
+  #   - Limited GPU memory
+  #   - Trade-off: 2-3× slower training
+
+  offload_param_device: none
+  # WHAT: Don't offload parameters to CPU
+  # WHY: Parameters needed frequently during forward/backward
+  #      Offloading causes significant slowdown
+  # OPTIONS: Same as offload_optimizer_device
+  # WHEN TO OFFLOAD:
+  #   - Extremely large models (100B+)
+  #   - Inference only (less frequent access)
+
+  zero3_init_flag: true
+  # WHAT: Initialize model with ZeRO-3 from the start
+  # WHY: Avoids creating full model on each GPU
+  #      Prevents OOM during model initialization
+  # HOW:
+  #   - Model initialized in sharded state
+  #   - Each GPU only allocates its partition
+  # MEMORY SAVINGS:
+  #   - Without flag: Full model on each GPU → OOM
+  #   - With flag: Sharded model → 1/N memory per GPU
+
+  zero3_save_16bit_model: true
+  # WHAT: Save checkpoints in 16-bit precision (BF16/FP16)
+  # WHY: Reduces checkpoint size by 50% (vs FP32)
+  #      Faster checkpoint saving/loading
+  #      No quality loss (training is already BF16)
+  # CHECKPOINT SIZE:
+  #   - FP32: 4 bytes/param → 7B model = 28 GB
+  #   - BF16: 2 bytes/param → 7B model = 14 GB
+  # NOTE: Set to true when using bf16/fp16 training
+
+  zero_stage: 3
+  # WHAT: Use ZeRO Stage 3 (partition everything)
+  # WHY: Maximum memory savings for large models
+  #      Enables training 7B models on 8× 40GB GPUs
+  # STAGES:
+  #   - 1: Partition optimizer states only
+  #   - 2: Partition optimizer states + gradients
+  #   - 3: Partition optimizer states + gradients + parameters
+  # MEMORY BREAKDOWN (7B model, 8 GPUs):
+  #   - Parameters: 14 GB → 1.75 GB per GPU
+  #   - Gradients: 14 GB → 1.75 GB per GPU
+  #   - Optimizer states: 28 GB (Adam) → 3.5 GB per GPU
+  #   - Total: ~7 GB per GPU (vs 56 GB without ZeRO-3)
+  # TRADE-OFF:
+  #   - Pro: 8× memory savings
+  #   - Con: ~10% slower due to communication overhead
+
+distributed_type: DEEPSPEED
+# WHAT: Use DeepSpeed for distributed training
+# WHY: DeepSpeed provides ZeRO optimizer
+# OPTIONS:
+#   - DEEPSPEED: DeepSpeed ZeRO
+#   - FSDP: PyTorch Fully Sharded Data Parallel (alternative)
+#   - MULTI_GPU: Basic DataParallel (no memory savings)
+#   - NO: Single GPU
+
+downcast_bf16: 'no'
+# WHAT: Don't downcast FP32 operations to BF16
+# WHY: Some operations (e.g., LayerNorm) need FP32 for stability
+#      Selective downcasting can cause numerical issues
+# OPTIONS:
+#   - 'no': Keep FP32 operations as FP32
+#   - 'yes': Downcast all FP32 to BF16 (aggressive, risky)
+
+machine_rank: 0
+# WHAT: Rank of this machine in multi-machine setup
+# WHY: Machine 0 is the coordinator (main process)
+#      Other machines would have rank 1, 2, etc.
+# CONTEXT: Single machine setup (num_machines=1), so always 0
+# MULTI-MACHINE EXAMPLE:
+#   - Machine 0 (rank 0): Coordinator, 8 GPUs
+#   - Machine 1 (rank 1): Worker, 8 GPUs
+#   - Total: 16 GPUs
+
+main_training_function: main
+# WHAT: Entry point function for training script
+# WHY: Accelerate looks for function named "main" in training script
+#      Standard convention for HuggingFace training scripts
+# EXAMPLE:
+#   def main(script_args, training_args, model_args):
+#       # Training code here
+#       pass
+
+mixed_precision: bf16
+# WHAT: Use bfloat16 mixed precision
+# WHY: BF16 reduces memory and speeds up training
+#      Better numerical stability than FP16
+#      Native support on H100/A100
+# PRECISION LEVELS:
+#   - fp32: Full precision (baseline)
+#   - fp16: Half precision (16-bit float)
+#   - bf16: Bfloat16 (16-bit, wider range than FP16)
+# COMPUTATION:
+#   - Forward/backward in BF16 (fast, low memory)
+#   - Optimizer updates in FP32 (stability)
+
+num_machines: 1
+# WHAT: Number of machines (nodes) for training
+# WHY: Single machine with 8 GPUs
+# MULTI-MACHINE:
+#   - Set to 2+ for multi-node training
+#   - Each machine runs same script with different machine_rank
+#   - Requires network communication between nodes
+
+num_processes: 8
+# WHAT: Number of processes (GPUs) for training
+# WHY: 8 processes = 8 GPUs on this machine
+#      Each GPU runs one process
+# CALCULATION:
+#   total_gpus = num_machines × num_processes
+#   Example: 1 machine × 8 GPUs = 8 total GPUs
+# SCALING:
+#   - More GPUs = faster training (if communication not bottleneck)
+#   - ZeRO-3 communication overhead: ~10% for 8 GPUs
+
+rdzv_backend: static
+# WHAT: Rendezvous backend for coordinating processes
+# WHY: "static" = fixed number of processes (no dynamic scaling)
+#      Simpler setup for fixed cluster
+# OPTIONS:
+#   - static: Fixed processes (no node failures)
+#   - c10d: PyTorch distributed backend (elastic)
+#   - etcd: Elastic training (can recover from failures)
+
+same_network: true
+# WHAT: All processes on same network
+# WHY: Faster communication (no inter-datacenter latency)
+#      Enables optimizations for local network
+# USE CASES:
+#   - true: Single machine or cluster with fast interconnect
+#   - false: Multi-datacenter training (rare)
+
+# ==============================================================================
+# TPU CONFIGURATION (NOT USED)
+# ==============================================================================
+# The following settings are for TPU training, which is not used here.
+# DeepSeek R1 training uses GPUs (NVIDIA H100/A100).
+
+tpu_env: []
+# WHAT: TPU environment variables
+# WHY: Not used (TPUs are Google's custom hardware)
+
+tpu_use_cluster: false
+# WHAT: Don't use TPU cluster
+# WHY: Training on GPUs, not TPUs
+
+tpu_use_sudo: false
+# WHAT: Don't use sudo for TPU
+# WHY: Not applicable
+
+use_cpu: false
+# WHAT: Don't use CPU for training
+# WHY: Training on GPUs (much faster)
+#      CPU training only for debugging or very small models
+
+# ==============================================================================
+# KEY TAKEAWAYS - DEEPSPEED ZERO-3
+# ==============================================================================
+#
+# 1. **ZeRO-3 Partitioning**:
+#    - Partitions parameters, gradients, optimizer states
+#    - 8× memory savings on 8 GPUs
+#    - Enables training 7B models on 8× 40GB GPUs
+#
+# 2. **Memory Breakdown (7B model, 8 GPUs)**:
+#    - Parameters: 14 GB → 1.75 GB/GPU
+#    - Gradients: 14 GB → 1.75 GB/GPU
+#    - Optimizer: 28 GB → 3.5 GB/GPU
+#    - Total: ~7 GB/GPU (vs 56 GB without ZeRO)
+#
+# 3. **No Offloading**:
+#    - offload_optimizer_device: none
+#    - offload_param_device: none
+#    - Keeps everything on GPU (fast)
+#    - Sufficient for 7B models on 8× 80GB H100s
+#
+# 4. **Mixed Precision (BF16)**:
+#    - mixed_precision: bf16
+#    - Forward/backward in BF16
+#    - Optimizer updates in FP32
+#    - 50% memory savings vs FP32
+#
+# 5. **Single Machine Setup**:
+#    - num_machines: 1
+#    - num_processes: 8
+#    - Total: 8 GPUs
+#    - Can scale to multi-node by increasing num_machines
+#
+# 6. **ZeRO-3 Initialization**:
+#    - zero3_init_flag: true
+#    - Initialize model in sharded state
+#    - Avoids OOM during initialization
+#
+# 7. **Checkpoint Savings**:
+#    - zero3_save_16bit_model: true
+#    - Checkpoints in BF16 (14 GB vs 28 GB)
+#    - Faster saving/loading
+#
+# 8. **Communication Overhead**:
+#    - ZeRO-3 requires all-gather for parameters
+#    - ~10% overhead on 8 GPUs with fast interconnect
+#    - Trade-off: memory savings vs speed
+#
+# 9. **When to Use ZeRO-3**:
+#    - Large models (7B+ parameters)
+#    - Multi-GPU training (4-8+ GPUs)
+#    - Limited GPU memory per device
+#
+# 10. **Alternatives**:
+#     - FSDP (PyTorch native, similar to ZeRO-3)
+#     - ZeRO-2 (faster, less memory savings)
+#     - Model parallelism (for 70B+ models)
+#
+# 11. **Usage Example**:
+#     accelerate launch \
+#       --config_file recipes/accelerate_configs/zero3.yaml \
+#       scripts/sft.py \
+#       --config recipes/config_distill.yaml
+#
+# 12. **Best Practices**:
+#     - Use ZeRO-3 for models that don't fit with ZeRO-2
+#     - Enable zero3_init_flag to avoid OOM
+#     - Use mixed_precision: bf16 for memory savings
+#     - Only offload if necessary (significantly slower)
+#
+# ==============================================================================
