@@ -1,0 +1,341 @@
+# ==============================================================================
+# FILE: recipes/Qwen2.5-1.5B-Instruct/grpo/config_demo_code_ioi.yaml
+# CATEGORY: Configuration - GRPO for IOI (Olympic Programming)
+# PRIORITY: HIGH
+# LINES: 61
+# DEPENDENCIES:
+#     - TRL: GRPOTrainer configuration
+#     - vLLM: Fast generation
+#     - IOI dataset: International Olympiad in Informatics problems
+# ==============================================================================
+#
+# OVERVIEW:
+# Configuration for training on IOI (International Olympiad in Informatics)
+# problems using GRPO. IOI represents the world's most challenging high school
+# programming competition, and this config trains models to solve Olympic-level
+# problems.
+#
+# ROLE IN DEEPSEEK R1:
+# - Demonstrates training on extremely difficult coding problems
+# - Uses ioi_code reward (subtask-based scoring with test execution)
+# - Produces the OlympicCoder model variant
+# - Different from Codeforces (IOI has subtasks, partial credit)
+#
+# TRAINING RECIPE:
+# - Model: Qwen2.5-1.5B-Instruct (smaller for faster iteration)
+# - Data: IOI problems from competitions
+# - Duration: 500 steps (1 epoch)
+# - Rewards: ioi_code (1.0) + code_format (0.1) + format (0.1)
+# - Language: C++ only (IOI standard)
+#
+# IOI VS CODEFORCES:
+# - IOI: Subtask-based scoring, partial credit, very hard
+# - Codeforces: Binary scoring (AC/WA), medium difficulty
+# - IOI: Olympic competition for high schoolers
+# - Codeforces: Online contests for all levels
+#
+# KEY DIFFERENCES FROM CODEFORCES CONFIG:
+# - Smaller model (1.5B vs 7B) - IOI is harder, start small
+# - Higher LR (5e-6 vs 1e-6) - smaller model can handle it
+# - Fewer generations (14 vs 16) - conserve compute
+# - Early stopping (batch_size=3) - most solutions fail early
+# - C++ only - IOI standard language
+# ==============================================================================
+
+# ==============================================================================
+# MODEL ARGUMENTS
+# ==============================================================================
+
+model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+# WHAT: Small Qwen2.5 model (1.5B parameters)
+# WHY: IOI problems are extremely difficult
+#      Start with smaller model for faster experimentation
+#      Can scale up to 7B/32B later (OlympicCoder-7B, OlympicCoder-32B)
+# STRATEGY: Prove concept on 1.5B, then scale
+
+model_revision: main
+# WHAT: Git revision from HuggingFace Hub
+
+torch_dtype: bfloat16
+# WHAT: BF16 precision for training
+
+attn_implementation: flash_attention_2
+# WHAT: Flash Attention 2 for efficiency
+
+# ==============================================================================
+# DATA TRAINING ARGUMENTS
+# ==============================================================================
+
+dataset_name: open-r1/ioi
+# WHAT: IOI problems dataset from HuggingFace
+# WHY: International Olympiad in Informatics
+#      Most challenging programming competition for high schoolers
+#      Problems from actual Olympic competitions (2010-2024)
+# DIFFICULTY: Much harder than Codeforces
+# COMPOSITION:
+#   - 100-200 IOI problems
+#   - Each with multiple subtasks
+#   - Each subtask with 5-50 test cases
+#   - Topics: graphs, DP, geometry, data structures
+
+dataset_prompt_column: problem
+# WHAT: Column containing problem statements
+# WHY: "problem" column has full IOI problem description
+#      Includes statement, constraints, examples, subtasks
+
+system_prompt: "You are a helpful AI Assistant that provides well-reasoned and detailed responses. You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"
+# WHAT: System prompt for <think>/<answer> format
+# WHY: IOI problems require deep reasoning
+#      <think> section for algorithm design
+#      <answer> section for C++ implementation
+
+# ==============================================================================
+# GRPO TRAINER CONFIG
+# ==============================================================================
+
+beta: 0.01
+# WHAT: Small KL divergence penalty
+# WHY: beta=0.01 provides mild constraint
+#      Prevents excessive divergence from reference policy
+#      Different from Codeforces (beta=0.0)
+# JUSTIFICATION: IOI rewards are noisier (subtask-based)
+#                Small KL penalty reduces variance
+
+bf16: true
+# WHAT: Enable BF16 mixed precision
+
+use_vllm: true
+# WHAT: Use vLLM for generation
+# WHY: Essential for GRPO speed
+
+do_eval: false
+# WHAT: No evaluation during training
+
+gradient_accumulation_steps: 4
+# WHAT: Accumulate over 4 forward passes
+# WHY: Smaller than Codeforces (4 vs 32)
+#      1.5B model is smaller, needs less accumulation
+
+gradient_checkpointing: true
+# WHAT: Enable activation checkpointing
+
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+hub_model_id: Qwen2.5-1.5B-Open-R1-Code-GRPO
+# WHAT: HuggingFace Hub repository name
+
+hub_strategy: every_save
+# WHAT: Push to Hub on every checkpoint
+
+learning_rate: 5.0e-06
+# WHAT: Learning rate (5e-6)
+# WHY: 5× higher than Codeforces (5e-6 vs 1e-6)
+#      Smaller model (1.5B vs 7B) can handle higher LR
+#      Faster learning on difficult problems
+
+log_completions: true
+# WHAT: Log generated C++ code to WandB
+
+log_level: info
+
+logging_first_step: true
+
+logging_steps: 1
+
+logging_strategy: steps
+
+lr_scheduler_type: cosine_with_min_lr
+# WHAT: Cosine learning rate decay
+# WHY: Different from Codeforces (constant_with_warmup)
+#      Cosine helps with convergence on hard problems
+
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+  # WHAT: Decay to 10% of peak LR
+  # WHY: min_lr = 0.1 × 5e-6 = 5e-7
+
+max_prompt_length: 1024
+# WHAT: Maximum prompt length in tokens
+# WHY: IOI problem statements are long
+#      Includes problem, constraints, examples, subtask descriptions
+
+max_completion_length: 2048
+# WHAT: Maximum completion length in tokens
+# WHY: Shorter than Codeforces (2048 vs 8192)
+#      IOI solutions can be complex but typically under 2K tokens
+#      <think> (algorithm design) + <answer> (C++ code)
+
+max_steps: 500
+# WHAT: Train for 500 optimization steps
+# WHY: Fixed step limit (not epoch-based)
+#      IOI dataset is small (~100-200 problems)
+#      500 steps with 14 generations provides good coverage
+
+num_generations: 14
+# WHAT: Generate 14 completions per prompt
+# WHY: Fewer than Codeforces (14 vs 16)
+#      IOI problems are harder, fewer high-quality solutions
+#      Conserve compute on difficult problems
+
+num_train_epochs: 1
+# WHAT: Train for 1 epoch
+# WHY: Combined with max_steps: 500
+#      Whichever comes first
+
+output_dir: data/Qwen2.5-1.5B-Open-R1-Code-GRPO
+
+overwrite_output_dir: true
+
+per_device_train_batch_size: 16
+# WHAT: 16 prompts per GPU
+# WHY: Smaller model (1.5B) allows larger batch
+#      Codeforces uses 4 with 7B model
+#      More prompts = better gradient estimates
+
+push_to_hub: true
+
+report_to:
+- wandb
+
+save_strategy: "steps"
+
+save_steps: 50
+# WHAT: Save every 50 steps
+# WHY: 500 steps / 50 = 10 checkpoints
+
+save_total_limit: 1
+
+seed: 42
+
+temperature: 1.0
+# WHAT: High sampling temperature
+# WHY: IOI problems require creative solutions
+#      High diversity helps exploration
+#      Codeforces uses 0.7 (more conservative)
+
+warmup_ratio: 0.03
+# WHAT: Warmup for 3% of training
+# WHY: 0.03 × 500 = 15 steps warmup
+#      Short warmup for small model
+
+# ==============================================================================
+# IOI SPECIFIC CONFIGURATION
+# ==============================================================================
+
+code_language: cpp
+# WHAT: Generate C++ code only
+# WHY: IOI official language is C++
+#      All IOI graders expect C++
+#      Most IOI contestants use C++
+# NOTE: No Python option (unlike Codeforces)
+
+reward_funcs:
+- ioi_code
+- code_format
+- format
+# WHAT: Three reward functions
+# WHY:
+#   - ioi_code: Execute with subtask-based scoring
+#   - code_format: Check for proper C++ code structure
+#   - format: Check <think>/<answer> tags
+
+reward_weights:
+- 1.0
+- 0.1
+- 0.1
+# WHAT: Weights for each reward
+# WHY:
+#   - ioi_code (1.0): Primary objective
+#   - code_format (0.1): Ensure valid C++
+#   - format (0.1): Ensure structured reasoning
+# TOTAL: reward = 1.0×ioi_code + 0.1×code_format + 0.1×format
+# RANGE: 0.0 to 1.2 (assuming all rewards 0.0-1.0)
+
+# for each generation, evaluate these many test cases in parallel, then check if any of them failed (0 score): if so stop evaluating
+# otherwise continue with the next batch of test cases. Useful to avoid overloading the eval server + save time on wrong solutions
+code_eval_test_batch_size: 3
+# WHAT: Run 3 test cases in parallel, then check for failures
+# WHY: Early stopping optimization
+#      Most IOI solutions fail on early test cases
+#      Batch size 3 balances parallelism and early stopping
+# STRATEGY:
+#   - Run 3 tests concurrently
+#   - If any fail (score=0.0), stop evaluation
+#   - Otherwise, run next batch of 3
+# COMPARISON:
+#   - Codeforces: batch_size=-1 (run all tests, no early stopping)
+#   - IOI: batch_size=3 (early stopping likely)
+
+# ==============================================================================
+# KEY TAKEAWAYS - IOI GRPO
+# ==============================================================================
+#
+# 1. **Problem Difficulty**:
+#    - IOI: World's hardest programming competition for high schoolers
+#    - Olympic-level problems (graphs, DP, geometry, etc.)
+#    - Much harder than Codeforces
+#
+# 2. **Subtask-Based Scoring**:
+#    - IOI problems have multiple subtasks (easy, medium, hard)
+#    - Each subtask worth points
+#    - Subtask score = min(test_scores) × points
+#    - Enables partial credit
+#
+# 3. **Model Scaling Strategy**:
+#    - Start with 1.5B for fast experimentation
+#    - Scale to 7B (OlympicCoder-7B)
+#    - Scale to 32B (OlympicCoder-32B)
+#    - Progressively tackle harder problems
+#
+# 4. **C++ Only**:
+#    - code_language: cpp
+#    - No Python support
+#    - IOI standard language
+#
+# 5. **Higher Learning Rate**:
+#    - 5e-6 (vs 1e-6 for Codeforces)
+#    - Smaller model tolerates higher LR
+#    - Faster learning on hard problems
+#
+# 6. **Early Stopping**:
+#    - code_eval_test_batch_size: 3
+#    - Most solutions fail early
+#    - Saves 50-80% of execution time
+#
+# 7. **High Temperature**:
+#    - temperature: 1.0 (vs 0.7 for Codeforces)
+#    - More diversity needed for hard problems
+#    - Encourages creative solutions
+#
+# 8. **KL Penalty**:
+#    - beta: 0.01 (vs 0.0 for Codeforces)
+#    - Mild constraint reduces variance
+#    - IOI rewards noisier due to subtasks
+#
+# 9. **Reward Structure**:
+#    - ioi_code (1.0): Subtask-based correctness
+#    - code_format (0.1): Valid C++ syntax
+#    - format (0.1): <think>/<answer> structure
+#
+# 10. **Training Scale**:
+#     - 500 optimization steps
+#     - 14 generations per prompt
+#     - Smaller dataset (~100-200 problems)
+#     - 1 epoch with step limit
+#
+# 11. **Comparison to Codeforces**:
+#     - Smaller model (1.5B vs 7B)
+#     - Higher LR (5e-6 vs 1e-6)
+#     - Shorter completions (2048 vs 8192)
+#     - Early stopping (batch=3 vs batch=-1)
+#     - C++ only (vs C++/Python)
+#     - Subtask scoring (vs binary pass/fail)
+#
+# 12. **OlympicCoder Evolution**:
+#     - v1: Qwen2.5-1.5B (proof of concept)
+#     - v2: OlympicCoder-7B (production)
+#     - v3: OlympicCoder-32B (state-of-the-art)
+#     - Each version tackles harder IOI problems
+#
+# ==============================================================================
