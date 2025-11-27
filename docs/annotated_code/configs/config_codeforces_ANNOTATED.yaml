@@ -1,0 +1,446 @@
+# ==============================================================================
+# FILE: recipes/Qwen2.5-Coder-7B-Instruct/grpo/config_codeforces.yaml
+# CATEGORY: Configuration - GRPO for Codeforces
+# PRIORITY: HIGH
+# LINES: 80
+# DEPENDENCIES:
+#     - TRL: GRPOTrainer configuration
+#     - vLLM: Fast generation
+#     - Codeforces dataset: Competitive programming problems
+# ==============================================================================
+#
+# OVERVIEW:
+# Configuration for training Qwen2.5-Coder-7B on Codeforces problems using GRPO.
+# This recipe specializes the model for competitive programming by training on
+# real contest problems with executable test cases.
+#
+# ROLE IN DEEPSEEK R1:
+# - Demonstrates code-specialized GRPO training
+# - Uses cf_code reward (execute and verify correctness)
+# - Trains on verifiable Codeforces problems
+# - Alternative to math-focused training
+#
+# TRAINING RECIPE:
+# - Model: Qwen2.5-Coder-7B-Instruct (code-pretrained)
+# - Data: Codeforces verifiable problems (~16K problems)
+# - Duration: 4 epochs (~1000 optimization steps)
+# - Rewards: cf_code (1.0) + code_format (0.1)
+# - Hardware: 8 GPUs recommended
+#
+# CODEFORCES DATASET:
+# - Real contest problems from codeforces.com
+# - Problems with executable test cases
+# - Both Python and C++ versions
+# - ~8K unique problems × 2 languages = 16K total
+#
+# KEY DIFFERENCES FROM MATH GRPO:
+# - Longer completions (8192 vs 2048 tokens)
+# - Code execution rewards (not symbolic verification)
+# - Code-pretrained base model
+# - Constant LR (not cosine)
+# ==============================================================================
+
+# ==============================================================================
+# MODEL ARGUMENTS
+# ==============================================================================
+
+model_name_or_path: Qwen/Qwen2.5-Coder-7B-Instruct
+# WHAT: Qwen2.5-Coder model (code-specialized)
+# WHY: Qwen2.5-Coder is pretrained on massive code corpora
+#      Better baseline for coding tasks than general models
+#      -Instruct variant already follows instructions
+# COMPARISON:
+#   - Qwen2.5-Coder: Specialized for code (Python, C++, etc.)
+#   - Qwen2.5-Math: Specialized for mathematics
+#   - Qwen2.5-base: General purpose
+
+model_revision: main
+# WHAT: Git revision from HuggingFace Hub
+# WHY: Reproducibility - locks to specific version
+
+torch_dtype: bfloat16
+# WHAT: Use BF16 precision
+# WHY: Memory savings + speed, standard for modern training
+
+attn_implementation: flash_attention_2
+# WHAT: Flash Attention 2 for efficient attention
+# WHY: Critical for long code completions (8192 tokens)
+
+# ==============================================================================
+# DATA TRAINING ARGUMENTS
+# ==============================================================================
+
+dataset_name: open-r1/codeforces
+# WHAT: Codeforces problems dataset from HuggingFace
+# WHY: Real competitive programming problems
+#      Executable test cases for verification
+#      Diverse difficulty levels
+# COMPOSITION:
+#   - Contest problems from codeforces.com
+#   - Official + generated test cases
+#   - Python and C++ versions
+
+dataset_prompt_column: prompt
+# WHAT: Column containing problem descriptions
+# WHY: "prompt" column has the full problem statement
+
+dataset_config: verifiable-prompts
+# WHAT: Subset of problems with executable tests
+# WHY: Only include problems we can automatically verify
+#      Excludes interactive/special judge problems
+
+dataset_test_split: test
+# WHAT: Use "test" split for evaluation (if enabled)
+
+dataset_train_split: train
+# WHAT: Use "train" split for training
+
+system_prompt: "You are a helpful AI Assistant that provides well-reasoned and detailed responses. You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"
+# WHAT: System prompt for <think>/<answer> format
+# WHY: Encourages reasoning before generating code
+#      Matches DeepSeek R1 structured reasoning
+# NOTE: <answer> section will contain the code solution
+
+# ==============================================================================
+# GRPO TRAINER CONFIG
+# ==============================================================================
+
+callbacks:
+- push_to_hub_revision
+# WHAT: Callbacks to run during training
+# WHY: push_to_hub_revision creates git tags for checkpoints
+#      Enables tracking model evolution
+
+benchmarks:
+- lcb_v4
+# WHAT: Evaluate on LiveCodeBench v4 after training
+# WHY: lcb_v4 is a coding benchmark
+#      Validates code generation capability
+# NOTE: Evaluation runs via Slurm job (see evaluation.py)
+
+beta: 0.0
+# WHAT: KL divergence penalty coefficient
+# WHY: beta=0.0 means no KL penalty
+#      Pure reward optimization (not constrained by reference policy)
+# RISK: Can lead to mode collapse or reward hacking
+# JUSTIFICATION: Code tasks have clear rewards (pass/fail)
+
+loss_type: dr_grpo
+# WHAT: Distributional Reward GRPO variant
+# WHY: dr_grpo models reward distribution, not just mean
+#      More robust to reward variance
+
+scale_rewards: false
+# WHAT: Don't scale rewards by standard deviation
+# WHY: Rewards already normalized to consistent range
+#      cf_code returns 0.0-1.1, code_format returns 0.0-1.0
+
+bf16: true
+# WHAT: Enable BF16 mixed precision
+# WHY: Faster training, lower memory
+
+do_eval: false
+# WHAT: Disable evaluation during training
+# WHY: No validation set configured
+#      Evaluation done post-training via benchmarks
+
+eval_strategy: "no"
+# WHAT: No evaluation strategy
+# WHY: Consistent with do_eval: false
+
+use_vllm: true
+# WHAT: Use vLLM for generation during GRPO
+# WHY: vLLM 10-20× faster than HuggingFace generate()
+#      Essential for GRPO (generates 16 completions per prompt)
+
+vllm_device: auto
+# WHAT: Auto-detect vLLM device placement
+# WHY: Let vLLM decide GPU allocation
+
+vllm_gpu_memory_utilization: 0.7
+# WHAT: Use 70% of GPU memory for vLLM
+# WHY: Reserve 30% for training process
+#      Avoids OOM when sharing GPUs
+
+gradient_accumulation_steps: 32
+# WHAT: Accumulate gradients over 32 forward passes
+# WHY: Effective batch size = 8 GPUs × 32 accum × 4 batch = 1024 samples
+#      = 64 unique prompts (1024/16 generations)
+# CALCULATION IN COMMENTS BELOW:
+#   total_samples_per_batch = 8 × 32 × 4 = 1024
+#   unique_prompts_per_batch = 1024 / 16 = 64
+
+gradient_checkpointing: true
+# WHAT: Enable activation checkpointing
+# WHY: Long completions (8192 tokens) need memory optimization
+
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+  # WHAT: Use non-reentrant checkpointing
+  # WHY: Better compatibility with Flash Attention
+
+hub_model_id: open-r1/Qwen2.5-Coder-7B-Instruct-Codeforces-GRPO
+# WHAT: HuggingFace Hub repository name
+# WHY: Descriptive name indicates model, dataset, method
+
+hub_model_revision: v01.00
+# WHAT: Git tag for this training run
+# WHY: Version tracking (v01.00, v01.01, etc.)
+
+hub_strategy: every_save
+# WHAT: Push to Hub on every checkpoint save
+# WHY: Keeps Hub up-to-date
+
+learning_rate: 1.0e-06
+# WHAT: Learning rate (1e-6)
+# WHY: Low LR for GRPO stability (RL is sensitive to LR)
+#      Same as math GRPO configs
+
+log_completions: true
+# WHAT: Log generated code to WandB
+# WHY: Inspect model outputs during training
+#      Debug reward functions
+#      Monitor code quality evolution
+
+log_level: info
+# WHAT: Info-level logging
+# WHY: Balanced verbosity
+
+logging_first_step: true
+# WHAT: Log at step 0
+# WHY: Baseline metrics
+
+logging_steps: 1
+# WHAT: Log every step
+# WHY: Fine-grained training monitoring
+
+logging_strategy: steps
+# WHAT: Log based on steps
+# WHY: Consistent with logging_steps
+
+lr_scheduler_type: constant_with_warmup
+# WHAT: Constant LR after warmup
+# WHY: Simpler than cosine for code tasks
+#      Warmup prevents instability
+# ALTERNATIVE: Math configs use cosine_with_min_lr
+
+max_grad_norm: 0.2
+# WHAT: Gradient clipping threshold
+# WHY: Prevents exploding gradients in RL
+#      Conservative value for stability
+
+max_prompt_length: 2000
+# WHAT: Maximum prompt length in tokens
+# WHY: Codeforces problem statements can be long
+#      Includes problem description, examples, constraints
+
+max_completion_length: 8192
+# WHAT: Maximum completion length in tokens
+# WHY: Code solutions can be long (especially with reasoning)
+#      <think> section + code can exceed 2048 tokens
+# MEMORY: 16 generations × 8192 tokens = 131K tokens per prompt
+
+max_steps: -1
+# WHAT: No step limit
+# WHY: Train for num_train_epochs instead
+
+num_generations: 16
+# WHAT: Generate 16 completions per prompt
+# WHY: GRPO uses group relative advantages
+#      More generations = better advantage estimates
+#      Standard across all GRPO configs
+
+# BATCH SIZE CALCULATION:
+# aiming for 1k optimization steps
+# total_samples_per_batch = num_gpus * grad_accumulation_steps * per_device_batch_size = 8 * 32 * 4 = 1024
+# unique_prompts_per_batch = total_samples_per_batch / num_generations = 1024 / 16 = 64
+# #dataset ~= 16k (8k * 2, for python and cpp)
+# global_steps_per_epoch = #dataset / unique_prompts_per_batch = 16k / 64 ~= 250
+# epochs_for_1k_steps = 1000/250 = 4 epochs
+#
+# EXPLANATION:
+#   - Dataset: 16K problems (8K Python + 8K C++)
+#   - Batch: 64 unique prompts per update
+#   - Steps per epoch: 16K / 64 = 250
+#   - Total steps: 250 × 4 epochs = 1000
+#   - This gives ~1000 optimization steps
+
+num_train_epochs: 4
+# WHAT: Train for 4 epochs
+# WHY: Targets ~1000 optimization steps (see calculation above)
+#      Enough for convergence without overfitting
+
+output_dir: data/Qwen2.5-Coder-7B-Instruct-Codeforces-GRPO_v01.00
+# WHAT: Local checkpoint directory
+# WHY: Includes version number for organization
+
+overwrite_output_dir: true
+# WHAT: Overwrite existing output directory
+# WHY: Allows rerunning training
+
+per_device_train_batch_size: 4
+# WHAT: 4 prompts per GPU
+# WHY: 4 prompts × 16 generations = 64 completions per GPU
+#      Fits in memory with 8192 token completions
+# EFFECTIVE: 4 × 8 GPUs × 32 accum = 1024 samples
+
+push_to_hub: true
+# WHAT: Enable pushing to Hub
+# WHY: Share checkpoints publicly
+
+report_to:
+- wandb
+# WHAT: Report metrics to Weights & Biases
+# WHY: Experiment tracking and visualization
+
+reward_funcs:
+- cf_code
+- code_format
+# WHAT: Reward functions for optimization
+# WHY:
+#   - cf_code: Execute code on test cases, verify correctness
+#   - code_format: Check <think>/<answer> structure
+
+reward_weights:
+- 1.0
+- 0.1
+# WHAT: Weights for each reward function
+# WHY:
+#   - cf_code (1.0): Primary objective (correctness)
+#   - code_format (0.1): Secondary (ensure structured output)
+# TOTAL: reward = 1.0×cf_code + 0.1×code_format
+# RANGE: 0.0 to 1.1 (cf_code) + 0.0 to 0.1 (format) = 0.0 to 1.2
+
+save_strategy: "steps"
+# WHAT: Save checkpoints based on steps
+# WHY: More control than epoch-based saving
+
+save_steps: 0.05
+# WHAT: Save every 5% of training
+# WHY: 0.05 × 1000 steps = every 50 steps
+#      20 checkpoints total
+
+save_total_limit: 1
+# WHAT: Keep only latest checkpoint locally
+# WHY: Save disk space (Hub keeps all versions)
+
+seed: 42
+# WHAT: Random seed
+# WHY: Reproducibility
+
+temperature: 0.7
+# WHAT: Sampling temperature for generation
+# WHY: Balance diversity (for GRPO) and quality
+#      Higher than greedy (0.0), lower than very diverse (1.0)
+
+wandb_entity: huggingface
+# WHAT: WandB organization
+# WHY: Tracks which team owns experiment
+
+wandb_project: open-r1
+# WHAT: WandB project name
+# WHY: Groups related experiments
+
+warmup_ratio: 0.1
+# WHAT: Warmup for 10% of training
+# WHY: ~100 steps warmup (10% of 1000)
+#      Higher than math GRPO (10% vs 3%)
+#      RL benefits from longer warmup
+
+# ==============================================================================
+# CODE EVALUATION SPECIFIC
+# ==============================================================================
+
+mask_truncated_completions: true
+# WHAT: Mask loss for truncated completions
+# WHY: If code hits max_completion_length, it's incomplete
+#      Don't train on incomplete code
+#      Prevents learning to generate truncated solutions
+
+# for each generation, evaluate these many test cases in parallel, then check if any of them failed (0 score): if so stop evaluating
+# otherwise continue with the next batch of test cases. Useful to avoid overloading the eval server + save time on wrong solutions
+code_eval_test_batch_size: -1
+# WHAT: Run all test cases in parallel (-1 = unlimited)
+# WHY: No early stopping for Codeforces
+#      weighted_sum scoring mode needs all test results
+#      Different from IOI (which uses batch_size=1 for early stopping)
+# ALTERNATIVE: Set to 1 for early stopping (faster on wrong solutions)
+
+code_eval_scoring_mode: weighted_sum
+# WHAT: Use weighted_sum scoring mode
+# WHY: Rewards both full solutions (1.0) and partial progress (0.1×ratio)
+#      Encourages learning even on hard problems
+# MODES:
+#   - pass_fail: Binary (1.0 or 0.0)
+#   - partial: Gradual (0.0 to 1.0)
+#   - weighted_sum: Hybrid (0.0 to 1.1)
+
+# ==============================================================================
+# KEY TAKEAWAYS - CODEFORCES GRPO
+# ==============================================================================
+#
+# 1. **Code Specialization**:
+#    - Start from Qwen2.5-Coder (not general model)
+#    - Train on Codeforces problems (not math)
+#    - Optimize for code correctness (not answer accuracy)
+#
+# 2. **Long Completions**:
+#    - max_completion_length: 8192 (vs 2048 for math)
+#    - Code + reasoning can be very long
+#    - Flash Attention + gradient checkpointing essential
+#
+# 3. **Reward Structure**:
+#    - cf_code (1.0): Execute and verify on test cases
+#    - code_format (0.1): Ensure <think>/<answer> structure
+#    - weighted_sum mode: Encourages progress
+#
+# 4. **Training Scale**:
+#    - 16K problems (Python + C++)
+#    - 4 epochs = ~1000 optimization steps
+#    - 64 prompts per batch
+#    - Carefully tuned for convergence
+#
+# 5. **Batch Size Calculation**:
+#    - 8 GPUs × 32 accum × 4 batch = 1024 samples
+#    - 1024 / 16 generations = 64 unique prompts
+#    - 16K dataset / 64 = 250 steps/epoch
+#    - 250 × 4 epochs = 1000 total steps
+#
+# 6. **vLLM Configuration**:
+#    - vllm_gpu_memory_utilization: 0.7
+#    - Reserves 30% for training
+#    - Critical for long completions
+#
+# 7. **Learning Rate Schedule**:
+#    - constant_with_warmup (not cosine)
+#    - Simpler for code tasks
+#    - 10% warmup (100 steps)
+#
+# 8. **Code Execution**:
+#    - batch_size: -1 (run all tests in parallel)
+#    - weighted_sum scoring
+#    - No early stopping (need all results)
+#
+# 9. **Checkpointing**:
+#    - Save every 5% (50 steps)
+#    - Keep only latest locally
+#    - All versions on Hub with git tags
+#
+# 10. **Comparison to Math GRPO**:
+#     - Longer completions (8192 vs 2048)
+#     - Code rewards vs math rewards
+#     - Code-pretrained base vs math-pretrained
+#     - Constant LR vs cosine
+#     - Different dataset (Codeforces vs MATH)
+#
+# 11. **Beta = 0**:
+#     - No KL penalty
+#     - Pure reward optimization
+#     - Risky but justified for clear code rewards
+#
+# 12. **Evaluation**:
+#     - Post-training: LiveCodeBench v4
+#     - Validates real-world code generation
+#     - Slurm job via callbacks
+#
+# ==============================================================================
