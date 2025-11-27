@@ -1,0 +1,241 @@
+# ==============================================================================
+# FILE: recipes/accelerate_configs/fsdp.yaml
+# CATEGORY: Configuration - FSDP Distributed Training
+# PRIORITY: HIGH
+# LINES: 27
+# DEPENDENCIES: HuggingFace Accelerate, PyTorch FSDP
+# ==============================================================================
+#
+# OVERVIEW:
+# FSDP (Fully Sharded Data Parallel) configuration for distributed training.
+# FSDP is PyTorch's native alternative to DeepSpeed ZeRO-3, providing similar
+# memory savings through parameter/gradient/optimizer sharding.
+#
+# FSDP VS DEEPSPEED ZERO-3:
+# - FSDP: PyTorch native (no external dependencies)
+# - ZeRO-3: Requires DeepSpeed library
+# - FSDP: Better PyTorch integration
+# - ZeRO-3: More mature, more features
+# - FSDP: Simpler configuration
+# - ZeRO-3: More tuning options
+#
+# WHEN TO USE FSDP:
+# - Prefer PyTorch-native solutions
+# - Want simpler setup (no DeepSpeed install)
+# - Good PyTorch version compatibility
+#
+# WHEN TO USE ZERO-3:
+# - Need advanced features (offloading, ZeRO-Infinity)
+# - Already using DeepSpeed
+# - Need maximum memory optimization
+#
+# MEMORY SAVINGS (Similar to ZeRO-3):
+# - 7B model on 8 GPUs: ~7 GB per GPU
+# - Everything sharded (params + grads + optimizer)
+# ==============================================================================
+
+compute_environment: LOCAL_MACHINE
+# Local cluster or workstation
+
+debug: false
+# No debug mode
+
+distributed_type: FSDP
+# WHAT: Use FSDP for distributed training
+# WHY: PyTorch-native alternative to DeepSpeed ZeRO
+# COMPARISON:
+#   - FSDP: PyTorch native
+#   - DEEPSPEED: External library
+#   - MULTI_GPU: Basic data parallel (no sharding)
+
+downcast_bf16: 'no'
+# Don't downcast FP32 operations to BF16
+
+enable_cpu_affinity: false
+# Don't pin processes to specific CPU cores
+# WHY: Not needed for most workloads
+
+# ==============================================================================
+# FSDP CONFIGURATION
+# ==============================================================================
+
+fsdp_config:
+  fsdp_activation_checkpointing: false # Need fix from: https://github.com/huggingface/transformers/pull/36610
+  # WHAT: Activation checkpointing for memory savings
+  # WHY: Currently disabled due to bug
+  #      PR #36610 adds fix
+  # FUTURE: Enable once PR merged for additional memory savings
+
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  # WHAT: Automatically wrap transformer layers for sharding
+  # WHY: FSDP needs to know which modules to shard
+  #      TRANSFORMER_BASED_WRAP detects transformer blocks
+  # HOW: Wraps nn.TransformerEncoderLayer, nn.TransformerDecoderLayer, etc.
+  # ALTERNATIVES:
+  #   - SIZE_BASED_WRAP: Wrap based on parameter count
+  #   - NO_WRAP: Manual wrapping
+
+  fsdp_backward_prefetch: BACKWARD_PRE
+  # WHAT: Prefetch parameters before backward pass
+  # WHY: Overlaps communication with computation
+  #      Reduces backward pass time
+  # HOW: Prefetch next layer's parameters while computing current layer
+  # OPTIONS:
+  #   - BACKWARD_PRE: Prefetch before backward (recommended)
+  #   - BACKWARD_POST: Prefetch after backward
+  #   - NO_PREFETCH: No prefetching
+
+  fsdp_cpu_ram_efficient_loading: true
+  # WHAT: Load model directly in sharded state
+  # WHY: Avoids creating full model on each rank
+  #      Prevents OOM during initialization
+  # HOW: Load 1/N of parameters per GPU directly
+  # COMPARISON: Similar to zero3_init_flag in DeepSpeed
+
+  fsdp_forward_prefetch: true
+  # WHAT: Prefetch parameters before forward pass
+  # WHY: Overlaps communication with computation
+  #      Reduces forward pass time
+  # HOW: Prefetch next layer's parameters while computing current layer
+
+  fsdp_offload_params: false
+  # WHAT: Don't offload parameters to CPU
+  # WHY: Offloading adds significant overhead (2-3× slower)
+  #      Not needed for 7B models on 8× 80GB GPUs
+  # WHEN TO ENABLE: Very large models (70B+) or limited GPU memory
+
+  fsdp_sharding_strategy: FULL_SHARD
+  # WHAT: Fully shard parameters, gradients, and optimizer states
+  # WHY: Maximum memory savings (like ZeRO-3)
+  # OPTIONS:
+  #   - FULL_SHARD: Shard everything (ZeRO-3 equivalent)
+  #   - SHARD_GRAD_OP: Shard gradients + optimizer (ZeRO-2 equivalent)
+  #   - NO_SHARD: No sharding (basic DDP)
+  #   - HYBRID_SHARD: Shard within node, replicate across nodes
+  # MEMORY SAVINGS (7B model, 8 GPUs):
+  #   - Parameters: 14 GB → 1.75 GB per GPU
+  #   - Gradients: 14 GB → 1.75 GB per GPU
+  #   - Optimizer: 28 GB → 3.5 GB per GPU
+  #   - Total: ~7 GB per GPU
+
+  fsdp_state_dict_type: FULL_STATE_DICT
+  # WHAT: Save full (unsharded) state dict
+  # WHY: Easier to load for inference or non-FSDP training
+  #      Can load checkpoint on single GPU
+  # OPTIONS:
+  #   - FULL_STATE_DICT: Full model (larger file, easier to use)
+  #   - SHARDED_STATE_DICT: Sharded model (smaller files, FSDP only)
+  #   - LOCAL_STATE_DICT: Local shard only
+
+  fsdp_sync_module_states: true
+  # WHAT: Synchronize module states across ranks at initialization
+  # WHY: Ensures all ranks start with same parameters
+  #      Critical for reproducibility
+  # HOW: Broadcast from rank 0 to all other ranks
+
+  fsdp_use_orig_params: true
+  # WHAT: Use original parameters (not flattened)
+  # WHY: Better compatibility with optimizers and hooks
+  #      Preserves parameter structure
+  # COMPARISON: False would flatten parameters for memory efficiency
+  # TRADE-OFF: True = better compatibility, False = slightly more memory efficient
+
+machine_rank: 0
+# Rank of this machine (0 = coordinator)
+
+main_training_function: main
+# Entry point function in training script
+
+mixed_precision: bf16
+# Use BF16 mixed precision
+# WHY: 50% memory savings, faster computation
+
+num_machines: 1
+# Single machine with 8 GPUs
+
+num_processes: 8
+# 8 processes = 8 GPUs
+
+rdzv_backend: static
+# Fixed number of processes
+
+same_network: true
+# All processes on same local network
+
+# ==============================================================================
+# TPU CONFIGURATION (NOT USED)
+# ==============================================================================
+
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+# ==============================================================================
+# KEY TAKEAWAYS - FSDP
+# ==============================================================================
+#
+# 1. **PyTorch Native**:
+#    - No external dependencies (unlike DeepSpeed)
+#    - Better PyTorch integration
+#    - Simpler installation and configuration
+#
+# 2. **Sharding Strategy**:
+#    - FULL_SHARD: Equivalent to DeepSpeed ZeRO-3
+#    - Shard parameters + gradients + optimizer
+#    - Maximum memory savings
+#
+# 3. **Memory Savings (7B model, 8 GPUs)**:
+#    - ~7 GB per GPU (same as ZeRO-3)
+#    - Parameters: 1.75 GB (sharded from 14 GB)
+#    - Gradients: 1.75 GB (sharded from 14 GB)
+#    - Optimizer: 3.5 GB (sharded from 28 GB)
+#
+# 4. **Prefetching**:
+#    - fsdp_forward_prefetch: true
+#    - fsdp_backward_prefetch: BACKWARD_PRE
+#    - Overlaps communication with computation
+#    - Reduces training time by ~10-15%
+#
+# 5. **Auto Wrapping**:
+#    - TRANSFORMER_BASED_WRAP
+#    - Automatically detects transformer layers
+#    - No manual wrapping needed
+#
+# 6. **CPU-Efficient Loading**:
+#    - fsdp_cpu_ram_efficient_loading: true
+#    - Load model directly in sharded state
+#    - Prevents OOM during initialization
+#
+# 7. **No Offloading**:
+#    - fsdp_offload_params: false
+#    - Keep everything on GPU
+#    - Sufficient for 7B models on 8× 80GB GPUs
+#
+# 8. **State Dict**:
+#    - FULL_STATE_DICT: Save complete model
+#    - Easier for inference
+#    - Can load on single GPU
+#
+# 9. **Activation Checkpointing**:
+#    - Currently disabled (bug)
+#    - Will enable after PR #36610
+#    - Additional memory savings when enabled
+#
+# 10. **FSDP vs ZeRO-3 Trade-offs**:
+#     - FSDP: Simpler setup, PyTorch native
+#     - ZeRO-3: More features, more mature
+#     - FSDP: Better for most PyTorch users
+#     - ZeRO-3: Better for advanced optimizations
+#
+# 11. **Use Cases**:
+#     - DeepSeek R1 7B models
+#     - Alternative to ZeRO-3 configuration
+#     - When avoiding external dependencies
+#
+# 12. **Performance**:
+#     - Similar to ZeRO-3 (~10% communication overhead)
+#     - Prefetching reduces overhead
+#     - Good balance of memory and speed
+#
+# ==============================================================================
