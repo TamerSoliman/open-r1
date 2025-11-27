@@ -1,0 +1,187 @@
+# ==============================================================================
+# FILE: recipes/accelerate_configs/zero2.yaml
+# CATEGORY: Configuration - DeepSpeed ZeRO-2 Distributed Training
+# PRIORITY: HIGH
+# LINES: 21
+# DEPENDENCIES: HuggingFace Accelerate, DeepSpeed, PyTorch
+# ==============================================================================
+#
+# OVERVIEW:
+# DeepSpeed ZeRO-2 configuration for distributed training. ZeRO-2 partitions
+# optimizer states and gradients across GPUs (but NOT parameters), providing
+# memory savings with less communication overhead than ZeRO-3.
+#
+# ZERO STAGES COMPARISON:
+# - ZeRO-1: Partition optimizer states only
+# - ZeRO-2: Partition optimizer states + gradients (THIS CONFIG)
+# - ZeRO-3: Partition optimizer states + gradients + parameters
+#
+# ZERO-2 VS ZERO-3:
+# - ZeRO-2: Each GPU stores FULL model parameters
+# - ZeRO-3: Each GPU stores 1/N of model parameters
+# - ZeRO-2: Lower communication overhead
+# - ZeRO-3: Higher memory savings
+#
+# MEMORY SAVINGS (7B model, 8 GPUs):
+# - ZeRO-2: ~35 GB per GPU (parameters: 14 GB, optimizer/grad: sharded)
+# - ZeRO-3: ~7 GB per GPU (everything sharded)
+#
+# WHEN TO USE ZERO-2:
+# - Medium models (7B-13B) that fit with ZeRO-2
+# - Faster training (less communication than ZeRO-3)
+# - Good balance of speed and memory efficiency
+#
+# WHEN TO USE ZERO-3:
+# - Large models (30B+) that don't fit with ZeRO-2
+# - Maximum memory savings needed
+# - Can tolerate ~10% communication overhead
+# ==============================================================================
+
+compute_environment: LOCAL_MACHINE
+# Local cluster or workstation (not cloud/SageMaker)
+
+debug: false
+# No debug mode (would add overhead)
+
+# ==============================================================================
+# DEEPSPEED CONFIGURATION
+# ==============================================================================
+
+deepspeed_config:
+  deepspeed_multinode_launcher: standard
+  # Launcher for multi-node training (pdsh or similar)
+
+  offload_optimizer_device: none
+  # Don't offload optimizer states to CPU
+  # WHY: ZeRO-2 sharding sufficient for 7B models on 8 GPUs
+  #      Offloading adds significant overhead
+
+  offload_param_device: none
+  # Don't offload parameters to CPU
+  # WHY: ZeRO-2 keeps full parameters on each GPU (no sharding)
+  #      No benefit to offloading
+
+  zero3_init_flag: false
+  # WHAT: Don't use ZeRO-3 initialization
+  # WHY: ZeRO-2 doesn't shard parameters
+  #      Each GPU initializes full model
+  # COMPARISON: zero3.yaml has true (sharded initialization)
+
+  zero_stage: 2
+  # WHAT: Use ZeRO Stage 2
+  # WHY: Partition optimizer states + gradients
+  #      Don't partition parameters (unlike ZeRO-3)
+  # MEMORY BREAKDOWN (7B model, 8 GPUs):
+  #   - Parameters: 14 GB per GPU (FULL model on each GPU)
+  #   - Gradients: 14 GB → 1.75 GB per GPU (sharded)
+  #   - Optimizer states: 28 GB (Adam) → 3.5 GB per GPU (sharded)
+  #   - Total: ~19 GB per GPU (vs ~7 GB for ZeRO-3)
+  # TRADE-OFF:
+  #   - Pro: Less communication overhead (~5% vs ~10% for ZeRO-3)
+  #   - Con: Higher memory usage per GPU
+
+distributed_type: DEEPSPEED
+# Use DeepSpeed for distributed training
+# ALTERNATIVES: FSDP (PyTorch native), MULTI_GPU (basic)
+
+downcast_bf16: 'no'
+# Don't downcast FP32 operations to BF16
+# WHY: Preserves numerical stability for certain operations
+
+machine_rank: 0
+# Rank of this machine (0 = coordinator)
+
+main_training_function: main
+# Entry point function in training script
+
+mixed_precision: bf16
+# Use BF16 mixed precision
+# WHY: 50% memory savings, faster computation
+#      Forward/backward in BF16, optimizer in FP32
+
+num_machines: 1
+# Single machine with 8 GPUs
+
+num_processes: 8
+# 8 processes = 8 GPUs
+
+rdzv_backend: static
+# Fixed number of processes (no dynamic scaling)
+
+same_network: true
+# All processes on same local network (fast interconnect)
+
+# ==============================================================================
+# TPU CONFIGURATION (NOT USED)
+# ==============================================================================
+
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+# TPU settings (not used for GPU training)
+
+use_cpu: false
+# Train on GPUs, not CPU
+
+# ==============================================================================
+# KEY TAKEAWAYS - DEEPSPEED ZERO-2
+# ==============================================================================
+#
+# 1. **Partitioning Strategy**:
+#    - Optimizer states: Sharded across GPUs
+#    - Gradients: Sharded across GPUs
+#    - Parameters: FULL on each GPU (not sharded)
+#
+# 2. **Memory Savings (7B model, 8 GPUs)**:
+#    - Parameters: 14 GB per GPU (full model)
+#    - Gradients: 1.75 GB per GPU (sharded from 14 GB)
+#    - Optimizer: 3.5 GB per GPU (sharded from 28 GB)
+#    - Total: ~19 GB per GPU
+#    - Comparison: ZeRO-3 uses ~7 GB per GPU
+#
+# 3. **Performance**:
+#    - ~5% communication overhead (vs ~10% for ZeRO-3)
+#    - Faster than ZeRO-3 due to less parameter communication
+#    - Good for models that fit with ZeRO-2
+#
+# 4. **When to Use ZeRO-2**:
+#    - Medium models: 7B-13B parameters
+#    - Have enough GPU memory for full parameters per GPU
+#    - Want faster training than ZeRO-3
+#    - Good balance: memory vs speed
+#
+# 5. **When to Use ZeRO-3 Instead**:
+#    - Large models: 30B+ parameters
+#    - Limited GPU memory (<40 GB per GPU)
+#    - Maximum memory savings needed
+#    - Can tolerate extra communication overhead
+#
+# 6. **No Offloading**:
+#    - offload_optimizer_device: none
+#    - offload_param_device: none
+#    - WHY: ZeRO-2 sharding sufficient for target models
+#    - Offloading would add 2-3× slowdown
+#
+# 7. **Initialization**:
+#    - zero3_init_flag: false
+#    - Each GPU initializes full model
+#    - No sharded initialization needed
+#
+# 8. **Comparison to ZeRO-3**:
+#    - ZeRO-2: Faster, uses more memory
+#    - ZeRO-3: Slower, uses less memory
+#    - ZeRO-2: Better for 7B-13B models
+#    - ZeRO-3: Required for 30B+ models
+#
+# 9. **Typical Use Cases**:
+#    - DeepSeek R1 7B models (Qwen2.5-Math-7B, Qwen2.5-Coder-7B)
+#    - GRPO training on 8× H100 GPUs
+#    - SFT with moderate context lengths
+#
+# 10. **Mixed Precision**:
+#     - mixed_precision: bf16
+#     - Forward/backward in BF16
+#     - Optimizer updates in FP32
+#     - Additional 50% memory savings
+#
+# ==============================================================================
