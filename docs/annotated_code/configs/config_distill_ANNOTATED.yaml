@@ -1,0 +1,373 @@
+# ==============================================================================
+# FILE: recipes/OpenR1-Distill-7B/sft/config_distill.yaml
+# CATEGORY: Configuration - SFT Stage 1 (Knowledge Distillation)
+# PRIORITY: CRITICAL
+# LINES: 48
+# DEPENDENCIES:
+#     - TRL: SFTTrainer configuration
+#     - HuggingFace Transformers: Model and training setup
+#     - WandB: Experiment tracking
+# ==============================================================================
+#
+# OVERVIEW:
+# This configuration file defines the complete setup for Stage 1 of the
+# DeepSeek R1 training pipeline: Supervised Fine-Tuning (SFT) for knowledge
+# distillation. It trains Qwen2.5-Math-7B to imitate DeepSeek-R1's reasoning.
+#
+# ROLE IN DEEPSEEK R1:
+# - Stage 1: Distill reasoning from DeepSeek-R1 to smaller model
+# - Learn <think>...</think><answer>...</answer> structure
+# - Absorb reasoning patterns from synthetic data
+# - Initialize model before GRPO (Stage 2)
+#
+# TRAINING RECIPE:
+# - Model: Qwen2.5-Math-7B-RoPE-300k (7B params, 300K RoPE)
+# - Data: Mixture-of-Thoughts (synthetic reasoning traces from DeepSeek-R1)
+# - Duration: 5 epochs
+# - Hardware: 1 node × 8 H100 GPUs (80GB)
+# - Optimization: BF16, Flash Attention 2, Liger kernel
+# - Context: 32,768 tokens (long reasoning chains)
+#
+# DATA FLOW:
+# Config file → TrlParser → ScriptArguments + SFTConfig
+#     → SFT training script → Trained model → Stage 2 (GRPO)
+# ==============================================================================
+
+# ==============================================================================
+# HARDWARE CONFIGURATION
+# ==============================================================================
+# Config for 1 node of 8 x H100s (80GB)
+#
+# WHAT: Target hardware setup for this training run
+# WHY: H100s provide BF16 support, large memory for long context
+# HOW: 8 GPUs with FSDP or DeepSpeed for distributed training
+#
+# EFFECTIVE BATCH SIZE CALCULATION:
+#   per_device_train_batch_size = 2
+#   gradient_accumulation_steps = 8
+#   num_gpus = 8
+#   effective_batch_size = 2 × 8 × 8 = 128 examples per update
+#
+# MEMORY USAGE:
+#   - 7B model in BF16 ≈ 14 GB
+#   - Optimizer states ≈ 28 GB (Adam with BF16 grads)
+#   - Activations for 32K context ≈ 30 GB
+#   - Total per GPU ≈ 70 GB (fits in 80 GB)
+
+# ==============================================================================
+# MODEL ARGUMENTS
+# ==============================================================================
+
+model_name_or_path: open-r1/Qwen2.5-Math-7B-RoPE-300k
+# WHAT: Base model for distillation
+# WHY: Qwen2.5-Math-7B has strong math reasoning baseline
+#      RoPE-300k variant supports long context (300K tokens)
+# CONTEXT: This is Stage 1 (distillation), so we start from math-capable model
+
+model_revision: main
+# WHAT: Git revision to load from HuggingFace Hub
+# WHY: Reproducibility - locks to specific model version
+
+torch_dtype: bfloat16
+# WHAT: Use bfloat16 precision for model weights
+# WHY: BF16 reduces memory usage (50% vs FP32)
+#      Better numerical stability than FP16 for training
+#      H100 GPUs have native BF16 support (fast)
+
+attn_implementation: flash_attention_2
+# WHAT: Use Flash Attention 2 for self-attention
+# WHY: Flash Attention 2 is 2-4× faster than standard attention
+#      Enables long context (32K tokens) without OOM
+#      Memory-efficient attention (O(N) vs O(N²) memory)
+# HOW: Fused CUDA kernel for attention computation
+
+# ==============================================================================
+# DATA TRAINING ARGUMENTS
+# ==============================================================================
+
+chat_template: "{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are Open-R1, a language model trained by Hugging Face to help users. Your role as an assistant involves thoroughly exploring questions through a systematic thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution using the specified format: <think> Thought section </think> Solution section. In the Thought section, detail your reasoning process in steps. Each step should include detailed considerations such as analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed to reach the conclusion. Now, try to solve the following question through the above guidelines.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are Open-R1, a language model trained by Hugging Face to help users. Your role as an assistant involves thoroughly exploring questions through a systematic thinking process before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop well-considered thinking process. Please structure your response into two main sections: Thought and Solution using the specified format: <think> Thought section </think> Solution section. In the Thought section, detail your reasoning process in steps. Each step should include detailed considerations such as analysing questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, explorations, and reflections from the Thought section, systematically present the final solution that you deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed to reach the conclusion. Now, try to solve the following question through the above guidelines.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n"
+# WHAT: Jinja2 template for formatting conversations
+# WHY: Standardizes input format for training
+#      Instructs model to use <think>...</think> <solution>...</solution> structure
+# FORMAT: ChatML (OpenAI's chat format)
+#
+# SYSTEM PROMPT (embedded in template):
+#   "You are Open-R1, a language model trained by Hugging Face to help users.
+#    Your role as an assistant involves thoroughly exploring questions through
+#    a systematic thinking process before providing the final precise and
+#    accurate solutions. This requires engaging in a comprehensive cycle of
+#    analysis, summarizing, exploration, reassessment, reflection, backtracing,
+#    and iteration to develop well-considered thinking process. Please structure
+#    your response into two main sections: Thought and Solution using the
+#    specified format: <think> Thought section </think> Solution section."
+#
+# STRUCTURE:
+#   <|im_start|>system
+#   [System prompt instructing to use think/solution structure]
+#   <|im_end|>
+#   <|im_start|>user
+#   [User's question]
+#   <|im_end|>
+#   <|im_start|>assistant
+#   <think>
+#   [Reasoning process - learned from DeepSeek-R1]
+#   </think>
+#   [Final answer]
+#   <|im_end|>
+
+dataset_name: open-r1/Mixture-of-Thoughts
+# WHAT: Training dataset from HuggingFace Hub
+# WHY: Mixture-of-Thoughts contains synthetic reasoning traces
+#      Generated by DeepSeek-R1 on diverse problems
+#      Provides examples of high-quality reasoning
+# COMPOSITION:
+#   - Math problems with step-by-step solutions
+#   - Code problems with reasoning about algorithms
+#   - Science questions with detailed explanations
+
+dataset_config: all
+# WHAT: Dataset configuration/subset to use
+# WHY: "all" loads all subsets of the dataset
+#      Enables training on diverse task types
+
+dataset_num_proc: 12
+# WHAT: Number of processes for dataset preprocessing
+# WHY: Parallel processing speeds up tokenization
+#      12 processes ≈ 1-2 per GPU (8 GPUs total)
+
+eos_token: <|im_end|>
+# WHAT: End-of-sequence token
+# WHY: Marks end of assistant's response in ChatML format
+#      Loss is computed up to (and including) this token
+
+# ==============================================================================
+# SFT TRAINER CONFIG
+# ==============================================================================
+
+bf16: true
+# WHAT: Enable bfloat16 mixed precision training
+# WHY: Reduces memory usage, speeds up training
+#      Compatible with torch_dtype: bfloat16 above
+
+do_eval: false
+# WHAT: Disable evaluation during training
+# WHY: No validation set in this recipe
+#      Evaluation done separately with LightEval
+
+eval_strategy: 'no'
+# WHAT: No evaluation strategy
+# WHY: Consistent with do_eval: false
+
+gradient_accumulation_steps: 8
+# WHAT: Accumulate gradients over 8 forward passes before updating
+# WHY: Increases effective batch size without OOM
+#      Effective batch size = 2 × 8 × 8 = 128
+# TRADE-OFF: More accumulation steps = less frequent updates = slower
+
+gradient_checkpointing: true
+# WHAT: Enable gradient checkpointing (activation checkpointing)
+# WHY: Reduces memory usage by recomputing activations during backward pass
+#      Critical for long context (32K tokens)
+# TRADE-OFF: Saves memory but adds ~20% compute overhead
+
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+  # WHAT: Use non-reentrant gradient checkpointing
+  # WHY: Better compatibility with certain operations
+  #      Required for some Flash Attention implementations
+
+hub_model_id: OpenR1-Distill-7B
+# WHAT: HuggingFace Hub repository for saving checkpoints
+# WHY: Automatic upload to Hub for sharing and deployment
+#      Enables evaluation on cluster via hub_model_id
+
+hub_strategy: every_save
+# WHAT: Push to Hub every time we save a checkpoint
+# WHY: Ensures Hub is always up-to-date
+#      Enables evaluation on latest checkpoints
+
+learning_rate: 4.0e-05
+# WHAT: Peak learning rate (4e-5)
+# WHY: Conservative for 7B model fine-tuning
+#      Lower than pre-training LR to avoid catastrophic forgetting
+# TYPICAL RANGE: 1e-5 to 1e-4 for fine-tuning
+
+log_level: info
+# WHAT: Logging verbosity
+# WHY: Info level provides progress without spam
+
+logging_steps: 1
+# WHAT: Log metrics every step
+# WHY: Fine-grained tracking of training progress
+#      Useful for debugging and monitoring
+
+logging_strategy: steps
+# WHAT: Log based on steps (not epochs)
+# WHY: Consistent with logging_steps
+
+lr_scheduler_type: cosine_with_min_lr
+# WHAT: Cosine learning rate schedule with minimum LR
+# WHY: Smooth decay from peak LR to min LR
+#      Better convergence than constant LR
+# SCHEDULE:
+#   warmup_ratio: 0.03 (3% of steps) → linear warmup to peak LR
+#   remaining 97% → cosine decay to min_lr_rate × peak LR
+
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+  # WHAT: Minimum LR = 10% of peak LR
+  # WHY: Non-zero min LR prevents complete stagnation
+  #      Allows continued learning at end of training
+  # CALCULATION: min_lr = 0.1 × 4e-5 = 4e-6
+
+packing: false
+# WHAT: Disable sequence packing
+# WHY: Packing concatenates short examples to fill max_length
+#      NOT used here because:
+#        1. Examples already long (near 32K tokens)
+#        2. Packing can confuse EOS token boundaries
+#        3. Simpler training without packing
+
+max_grad_norm: 0.2
+# WHAT: Gradient clipping threshold
+# WHY: Prevents exploding gradients
+#      0.2 is conservative (stable training)
+# HOW: Clip gradient norm to max_grad_norm
+
+max_length: 32768
+# WHAT: Maximum sequence length (32K tokens)
+# WHY: DeepSeek-R1 reasoning traces can be very long
+#      Qwen2.5-Math-7B-RoPE-300k supports 300K tokens
+# MEMORY: 32K context requires Flash Attention + gradient checkpointing
+
+max_steps: -1
+# WHAT: No maximum step limit
+# WHY: Train for num_train_epochs instead
+
+num_train_epochs: 5
+# WHAT: Train for 5 full passes over the dataset
+# WHY: Sufficient for knowledge distillation
+#      More epochs risk overfitting on synthetic data
+# TOTAL STEPS: depends on dataset size and batch size
+
+output_dir: data/OpenR1-Distill-7B
+# WHAT: Local directory for saving checkpoints
+# WHY: Stores model, optimizer state, training state
+#      Used for resuming from checkpoint
+
+overwrite_output_dir: true
+# WHAT: Overwrite existing output directory
+# WHY: Allows rerunning training without manual cleanup
+
+per_device_eval_batch_size: 1
+# WHAT: Batch size per GPU for evaluation (not used since do_eval=false)
+# WHY: Placeholder value
+
+per_device_train_batch_size: 2
+# WHAT: Batch size per GPU for training
+# WHY: 2 sequences × 32K tokens ≈ 64K tokens per GPU
+#      Fits in 80GB H100 with gradient checkpointing
+# EFFECTIVE BATCH SIZE: 2 × 8 GPUs × 8 accumulation = 128
+
+push_to_hub: true
+# WHAT: Enable pushing checkpoints to HuggingFace Hub
+# WHY: Share model publicly, enable evaluation, deployment
+
+report_to:
+- wandb
+# WHAT: Report metrics to Weights & Biases
+# WHY: Experiment tracking, visualization, collaboration
+#      Logs loss, learning rate, throughput, etc.
+
+save_strategy: epoch
+# WHAT: Save checkpoint at end of each epoch
+# WHY: 5 checkpoints total (one per epoch)
+#      Enables comparing performance across epochs
+
+save_total_limit: 1
+# WHAT: Keep only 1 latest checkpoint on disk
+# WHY: Save disk space (7B model + optimizer ≈ 50 GB per checkpoint)
+#      Hub stores all checkpoints (uploaded via hub_strategy)
+
+seed: 42
+# WHAT: Random seed for reproducibility
+# WHY: Ensures deterministic initialization and data shuffling
+#      Critical for reproducing results
+
+use_liger_kernel: true
+# WHAT: Enable Liger kernel optimizations
+# WHY: Liger provides memory-efficient implementations of:
+#        - Cross-entropy loss (fused kernel)
+#        - RMSNorm (fused kernel)
+#        - RoPE (fused kernel)
+#      Reduces memory usage by ~30%
+#      Speeds up training by ~15%
+
+warmup_ratio: 0.03
+# WHAT: Warmup for first 3% of training steps
+# WHY: Gradual LR increase prevents instability at start
+#      Allows model to stabilize before full learning rate
+# CALCULATION:
+#   total_steps = num_epochs × steps_per_epoch
+#   warmup_steps = 0.03 × total_steps
+#   LR: 0 → 4e-5 (linear) over warmup_steps
+#       4e-5 → 4e-6 (cosine) over remaining steps
+
+# ==============================================================================
+# KEY TAKEAWAYS - SFT DISTILLATION CONFIG
+# ==============================================================================
+#
+# 1. **Knowledge Distillation Goal**:
+#    - Learn reasoning patterns from DeepSeek-R1 (via Mixture-of-Thoughts)
+#    - Start from strong math baseline (Qwen2.5-Math-7B)
+#    - Teach <think>...</think> structure for reasoning
+#
+# 2. **Long Context Training**:
+#    - 32K tokens per sequence (reasoning chains are long)
+#    - Flash Attention 2 (memory-efficient)
+#    - Gradient checkpointing (trade compute for memory)
+#    - RoPE-300k base model (supports long context)
+#
+# 3. **Memory Optimization**:
+#    - BF16 mixed precision (50% memory savings)
+#    - Gradient checkpointing (50% activation memory savings)
+#    - Liger kernel (30% additional savings)
+#    - No packing (examples already long)
+#
+# 4. **Effective Batch Size**:
+#    - per_device = 2, gpus = 8, accumulation = 8
+#    - effective_batch_size = 128
+#    - Large batch size stabilizes training
+#
+# 5. **Learning Rate Schedule**:
+#    - Peak LR: 4e-5 (conservative for fine-tuning)
+#    - 3% warmup (stabilize at start)
+#    - Cosine decay to 10% of peak (continued learning)
+#
+# 6. **Training Duration**:
+#    - 5 epochs on Mixture-of-Thoughts
+#    - Save checkpoint per epoch
+#    - Keep only latest checkpoint locally (disk space)
+#
+# 7. **ChatML Format**:
+#    - Standardized conversation format
+#    - System prompt instructs <think> structure
+#    - EOS token: <|im_end|>
+#
+# 8. **Hardware Requirements**:
+#    - 1 node × 8 H100 GPUs (80GB)
+#    - ~70 GB per GPU (model + optimizer + activations)
+#    - BF16 support (native on H100)
+#
+# 9. **Integration Points**:
+#    - Input: Mixture-of-Thoughts dataset (synthetic data)
+#    - Output: OpenR1-Distill-7B checkpoint on Hub
+#    - Next stage: GRPO training (Stage 2)
+#
+# 10. **Best Practices**:
+#     - Conservative LR for fine-tuning
+#     - Gradient clipping (max_grad_norm = 0.2)
+#     - Reproducibility (seed = 42)
+#     - Experiment tracking (WandB)
+#
+# ==============================================================================

@@ -1,0 +1,403 @@
+# ==============================================================================
+# FILE: recipes/DeepSeek-R1-Distill-Qwen-1.5B/grpo/config_demo.yaml
+# CATEGORY: Configuration - GRPO Stage 2 (Reinforcement Learning)
+# PRIORITY: CRITICAL
+# LINES: 59
+# DEPENDENCIES:
+#     - TRL: GRPOTrainer configuration
+#     - vLLM: Fast generation during GRPO
+#     - HuggingFace Transformers: Model and training setup
+#     - WandB: Experiment tracking
+# ==============================================================================
+#
+# OVERVIEW:
+# This configuration file defines the complete setup for Stage 2 of the
+# DeepSeek R1 training pipeline: Group Relative Policy Optimization (GRPO).
+# It uses reinforcement learning with multi-objective rewards to improve
+# reasoning quality, format adherence, and answer accuracy.
+#
+# ROLE IN DEEPSEEK R1:
+# - Stage 2: RL fine-tuning after SFT (Stage 1)
+# - Improve reasoning via multi-objective rewards
+# - Learn from feedback (rewards) rather than supervised labels
+# - Balance multiple objectives (accuracy, format, tag count)
+#
+# TRAINING RECIPE:
+# - Model: DeepSeek-R1-Distill-Qwen-1.5B (1.5B params, after SFT)
+# - Data: OpenR1-Math-220k (math problems for verification)
+# - Duration: 1 epoch
+# - Algorithm: GRPO (group relative advantages)
+# - Rewards: accuracy (1.0) + format (1.0) + tag_count (1.0)
+# - Generations: 16 per prompt (high diversity)
+# - Hardware: Flexible (can run on fewer GPUs than SFT)
+#
+# DATA FLOW:
+# Config file → TrlParser → GRPOScriptArguments + GRPOConfig
+#     → GRPO training script → Trained model → Evaluation
+#
+# GRPO ALGORITHM RECAP:
+# 1. Sample N completions per prompt (N=16)
+# 2. Compute rewards for each completion
+# 3. Calculate group relative advantages: reward - mean(rewards_for_prompt)
+# 4. Policy gradient update with advantages
+# 5. Repeat for all prompts in dataset
+# ==============================================================================
+
+# ==============================================================================
+# MODEL ARGUMENTS
+# ==============================================================================
+
+model_name_or_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+# WHAT: Base model for GRPO training
+# WHY: This is the output of Stage 1 (SFT distillation)
+#      Already knows <think>...</think> structure from Mixture-of-Thoughts
+# CONTEXT: Stage 2 (GRPO) starts from SFT checkpoint, not base Qwen model
+# NOTE: For training your own model, replace with your SFT checkpoint
+
+model_revision: main
+# WHAT: Git revision to load from HuggingFace Hub
+# WHY: Reproducibility - locks to specific model version
+
+torch_dtype: bfloat16
+# WHAT: Use bfloat16 precision for model weights
+# WHY: BF16 reduces memory usage (50% vs FP32)
+#      Better numerical stability than FP16 for RL
+#      Native support on modern GPUs (H100, A100)
+
+attn_implementation: flash_attention_2
+# WHAT: Use Flash Attention 2 for self-attention
+# WHY: Flash Attention 2 is 2-4× faster than standard attention
+#      Memory-efficient (critical for generating 16 completions)
+# HOW: Fused CUDA kernel for attention computation
+
+# ==============================================================================
+# DATA TRAINING ARGUMENTS
+# ==============================================================================
+
+# We edit the DeepSeek chat template to ensure (a) the reasoning block within <think> and </think> is included in the completion and (b) the <think> tag is not part of the prefill so that the format reward works
+chat_template: "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% set ns = namespace(is_first=false, is_tool=false, is_output_first=true, system_prompt='') %}{%- for message in messages %}{%- if message['role'] == 'system' %}{% set ns.system_prompt = message['content'] %}{%- endif %}{%- endfor %}{{bos_token}}{{ns.system_prompt}}{%- for message in messages %}{%- if message['role'] == 'user' %}{%- set ns.is_tool = false -%}{{'<｜User｜>' + message['content']}}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is none %}{%- set ns.is_tool = false -%}{%- for tool in message['tool_calls']%}{%- if not ns.is_first %}{{'<｜Assistant｜><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```' + '<｜tool▁call▁end｜>'}}{%- set ns.is_first = true -%}{%- else %}{{'\\n' + '<｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\\n' + '```json' + '\\n' + tool['function']['arguments'] + '\\n' + '```' + '<｜tool▁call▁end｜>'}}{{'<｜tool▁calls▁end｜><｜end▁of▁sentence｜>'}}{%- endif %}{%- endfor %}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is not none %}{%- if ns.is_tool %}{{'<｜tool▁outputs▁end｜>' + message['content'] + '<｜end▁of▁sentence｜>'}}{%- set ns.is_tool = false -%}{%- else %}{% set content = message['content'] %}{{'<｜Assistant｜>' + content + '<｜end▁of▁sentence｜>'}}{%- endif %}{%- endif %}{%- if message['role'] == 'tool' %}{%- set ns.is_tool = true -%}{%- if ns.is_output_first %}{{'<｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- set ns.is_output_first = false %}{%- else %}{{'\\n<｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- endif %}{%- endif %}{%- endfor -%}{% if ns.is_tool %}{{'<｜tool▁outputs▁end｜>'}}{% endif %}{% if add_generation_prompt and not ns.is_tool %}{{'<｜Assistant｜>'}}{% endif %}"
+# WHAT: Jinja2 template for DeepSeek chat format
+# WHY: Critical design decisions for GRPO:
+#      (a) <think>...</think> included in completion (not prefill)
+#          → Model generates thinking, can be rewarded for format
+#      (b) <think> tag not in prefill
+#          → format_reward can verify structure
+# FORMAT: DeepSeek's custom chat format with tool support
+# TOKENS:
+#   - <｜User｜>: User message prefix
+#   - <｜Assistant｜>: Assistant response prefix
+#   - <｜end▁of▁sentence｜>: End of turn
+
+dataset_name: open-r1/OpenR1-Math-220k
+# WHAT: Training dataset from HuggingFace Hub
+# WHY: OpenR1-Math-220k contains 220K math problems
+#      Math is ideal for GRPO:
+#        - Verifiable answers (accuracy reward)
+#        - Requires reasoning (benefits from <think>)
+#        - Clear right/wrong (reward signal)
+# COMPOSITION:
+#   - Competition math (AMC, AIME, etc.)
+#   - Word problems
+#   - Algebra, geometry, number theory
+
+dataset_prompt_column: problem
+# WHAT: Dataset column containing prompts
+# WHY: "problem" column has the math question
+#      Used as input for generation during GRPO
+
+system_prompt: "You are a helpful AI Assistant that provides well-reasoned and detailed responses. You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"
+# WHAT: System prompt prepended to every conversation
+# WHY: Instructs model to use <think>/<answer> structure
+#      Reinforces format learned during SFT
+#      Ensures format_reward can verify structure
+# NOTE: Different from SFT system prompt (uses <answer> instead of bare text)
+
+# ==============================================================================
+# GRPO TRAINER CONFIG
+# ==============================================================================
+
+bf16: true
+# WHAT: Enable bfloat16 mixed precision training
+# WHY: Reduces memory usage, speeds up training
+#      Compatible with torch_dtype: bfloat16 above
+
+use_vllm: true
+# WHAT: Use vLLM for generation during GRPO
+# WHY: vLLM is MUCH faster than HuggingFace generate()
+#      Critical for GRPO (generate 16 completions per prompt)
+#      PagedAttention + continuous batching = 10-20× speedup
+# HOW: Launches vLLM server, queries via OpenAI-compatible API
+# REQUIREMENT: vLLM must be installed
+
+do_eval: false
+# WHAT: Disable evaluation during training
+# WHY: No validation set in this demo config
+#      Evaluation done separately with LightEval
+
+gradient_accumulation_steps: 4
+# WHAT: Accumulate gradients over 4 forward passes before updating
+# WHY: Increases effective batch size without OOM
+#      Effective batch size = 16 × 4 = 64 prompts per update
+# NOTE: Lower than SFT (4 vs 8) because GRPO uses more memory for generations
+
+gradient_checkpointing: true
+# WHAT: Enable gradient checkpointing (activation checkpointing)
+# WHY: Reduces memory usage by recomputing activations during backward pass
+#      Critical for GRPO (need memory for 16 generations)
+# TRADE-OFF: Saves memory but adds ~20% compute overhead
+
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+  # WHAT: Use non-reentrant gradient checkpointing
+  # WHY: Better compatibility with Flash Attention 2
+
+hub_model_id: DeepSeek-R1-Distill-Qwen-1.5B-GRPO
+# WHAT: HuggingFace Hub repository for saving checkpoints
+# WHY: Automatic upload to Hub for sharing and deployment
+#      Distinguishes GRPO checkpoint from SFT checkpoint
+
+hub_strategy: every_save
+# WHAT: Push to Hub every time we save a checkpoint
+# WHY: Ensures Hub is always up-to-date
+
+learning_rate: 1.0e-06
+# WHAT: Learning rate (1e-6)
+# WHY: MUCH lower than SFT (1e-6 vs 4e-5)
+#      RL is unstable with high LR
+#      Small updates preserve SFT knowledge
+# CONTEXT: GRPO fine-tunes an already-trained model (from SFT)
+
+log_completions: true
+# WHAT: Log generated completions to WandB
+# WHY: Inspect model outputs during training
+#      Debug reward functions
+#      Monitor format adherence
+# EXAMPLE LOGGED DATA:
+#   - Prompt: "Solve 2x + 3 = 7"
+#   - Completion: "<think>\nSubtract 3: 2x = 4\nDivide by 2: x = 2\n</think>\n<answer>\nx = 2\n</answer>"
+#   - Rewards: accuracy=1.0, format=1.0, tag_count=1.0
+
+log_level: info
+# WHAT: Logging verbosity
+# WHY: Info level provides progress without spam
+
+logging_first_step: true
+# WHAT: Log metrics at step 0 (before training)
+# WHY: Baseline for comparison
+
+logging_steps: 1
+# WHAT: Log metrics every step
+# WHY: Fine-grained tracking of training progress
+
+logging_strategy: steps
+# WHAT: Log based on steps (not epochs)
+# WHY: Consistent with logging_steps
+
+lr_scheduler_type: cosine_with_min_lr
+# WHAT: Cosine learning rate schedule with minimum LR
+# WHY: Smooth decay from peak LR to min LR
+#      Better convergence than constant LR
+# SCHEDULE:
+#   warmup_ratio: 0.1 (10% of steps) → linear warmup to peak LR
+#   remaining 90% → cosine decay to min_lr_rate × peak LR
+
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+  # WHAT: Minimum LR = 10% of peak LR
+  # WHY: Non-zero min LR prevents complete stagnation
+  # CALCULATION: min_lr = 0.1 × 1e-6 = 1e-7
+
+max_prompt_length: 512
+# WHAT: Maximum prompt length in tokens
+# WHY: Math problems are usually short (<512 tokens)
+#      Longer prompts truncated
+# MEMORY: Shorter prompts = more memory for completions
+
+max_completion_length: 2048
+# WHAT: Maximum completion length in tokens
+# WHY: Reasoning chains can be long (think section + answer)
+#      2048 tokens allows detailed reasoning
+# MEMORY: 16 completions × 2048 tokens = 32K tokens per prompt
+
+max_steps: -1
+# WHAT: No maximum step limit
+# WHY: Train for num_train_epochs instead
+
+num_generations: 16
+# WHAT: Generate 16 completions per prompt
+# WHY: GRPO uses group relative advantages
+#      More generations = better advantage estimates
+#      16 is typical (trade-off: diversity vs compute)
+# ALGORITHM:
+#   For each prompt:
+#     1. Generate 16 completions
+#     2. Compute rewards for each
+#     3. Advantages = rewards - mean(rewards)
+#     4. Update policy with advantages
+
+num_train_epochs: 1
+# WHAT: Train for 1 full pass over the dataset
+# WHY: GRPO converges faster than SFT
+#      1 epoch often sufficient
+#      More epochs risk overfitting/reward hacking
+# TOTAL STEPS: 220K prompts / (16 batch × 4 accum) = ~3,400 steps
+
+output_dir: data/DeepSeek-R1-Distill-Qwen-1.5B-GRPO
+# WHAT: Local directory for saving checkpoints
+# WHY: Stores model, optimizer state, training state
+
+overwrite_output_dir: true
+# WHAT: Overwrite existing output directory
+# WHY: Allows rerunning training without manual cleanup
+
+per_device_eval_batch_size: 16
+# WHAT: Batch size per GPU for evaluation (not used since do_eval=false)
+# WHY: Placeholder value
+
+per_device_train_batch_size: 16
+# WHAT: Batch size per GPU for training (16 prompts)
+# WHY: 16 prompts × 16 generations = 256 completions per batch
+#      Higher than SFT batch size (16 vs 2) because:
+#        - Shorter sequences (prompt=512, completion=2048)
+#        - vLLM handles generation efficiently
+# EFFECTIVE BATCH SIZE: 16 × 4 accumulation = 64 prompts per update
+
+push_to_hub: true
+# WHAT: Enable pushing checkpoints to HuggingFace Hub
+# WHY: Share model publicly, enable evaluation, deployment
+
+report_to:
+- wandb
+# WHAT: Report metrics to Weights & Biases
+# WHY: Experiment tracking, visualization
+#      Critical for GRPO: track rewards, advantages, policy updates
+
+reward_funcs:
+- accuracy
+- format
+- tag_count
+# WHAT: List of reward functions to use
+# WHY: Multi-objective RL balances multiple goals:
+#      - accuracy: Correct answer (verified symbolically)
+#      - format: Proper <think>/<answer> structure
+#      - tag_count: Counts <think> tags (encourages reasoning)
+# HOW: Each function in src/open_r1/utils/rewards.py
+# COMPUTATION:
+#   total_reward = sum(weight_i × reward_i for i in funcs)
+
+reward_weights:
+- 1.0
+- 1.0
+- 1.0
+# WHAT: Weights for each reward function
+# WHY: Equal weighting (1.0 each) treats all objectives equally
+#      Could adjust to prioritize (e.g., 2.0 for accuracy)
+# COMPUTATION:
+#   total_reward = 1.0×accuracy + 1.0×format + 1.0×tag_count
+# TYPICAL RANGE: 0.0 to 2.0
+
+save_strategy: "epoch"
+# WHAT: Save checkpoint at end of each epoch
+# WHY: 1 epoch = 1 checkpoint (simple)
+
+save_total_limit: 1
+# WHAT: Keep only 1 latest checkpoint on disk
+# WHY: Save disk space (1.5B model + optimizer ≈ 10 GB per checkpoint)
+
+seed: 42
+# WHAT: Random seed for reproducibility
+# WHY: Ensures deterministic generation and sampling
+#      Critical for reproducing GRPO results (RL is noisy)
+
+temperature: 0.7
+# WHAT: Sampling temperature for generation
+# WHY: temperature=0.7 balances diversity and quality
+#      Higher = more diverse, lower = more focused
+#      0.0 = greedy (deterministic)
+# GRPO CONTEXT: Need diversity for good advantage estimates
+
+use_liger_kernel: true
+# WHAT: Enable Liger kernel optimizations
+# WHY: Memory-efficient implementations reduce memory by ~30%
+#      Speeds up training by ~15%
+
+warmup_ratio: 0.1
+# WHAT: Warmup for first 10% of training steps
+# WHY: Gradual LR increase prevents instability at start
+#      Higher than SFT (10% vs 3%) because RL is more unstable
+# CALCULATION:
+#   total_steps ≈ 3,400
+#   warmup_steps = 0.1 × 3,400 = 340
+#   LR: 0 → 1e-6 (linear) over warmup_steps
+#       1e-6 → 1e-7 (cosine) over remaining steps
+
+# ==============================================================================
+# KEY TAKEAWAYS - GRPO CONFIG
+# ==============================================================================
+#
+# 1. **GRPO Algorithm**:
+#    - Generate 16 completions per prompt (high diversity)
+#    - Compute multi-objective rewards
+#    - Use group relative advantages (rewards - mean)
+#    - Policy gradient update
+#
+# 2. **Multi-Objective RL**:
+#    - accuracy: Correct answer (1.0 weight)
+#    - format: <think>/<answer> structure (1.0 weight)
+#    - tag_count: Encourages reasoning (1.0 weight)
+#    - Total reward = sum of weighted rewards
+#
+# 3. **Learning Rate**:
+#    - 1e-6 (100× lower than SFT)
+#    - RL is unstable with high LR
+#    - Small updates preserve SFT knowledge
+#
+# 4. **vLLM Integration**:
+#    - use_vllm: true (critical for performance)
+#    - 10-20× faster than HuggingFace generate()
+#    - PagedAttention + continuous batching
+#
+# 5. **Generation Settings**:
+#    - num_generations: 16 (diversity for advantage estimates)
+#    - temperature: 0.7 (balanced diversity/quality)
+#    - max_completion_length: 2048 (long reasoning chains)
+#
+# 6. **Batch Size**:
+#    - per_device_train_batch_size: 16 prompts
+#    - num_generations: 16 → 256 completions per batch
+#    - gradient_accumulation_steps: 4 → effective 64 prompts
+#
+# 7. **Training Duration**:
+#    - 1 epoch (GRPO converges fast)
+#    - ~3,400 steps for 220K dataset
+#    - Longer training risks reward hacking
+#
+# 8. **Chat Template**:
+#    - DeepSeek format with tool support
+#    - <think> in completion (not prefill)
+#    - Enables format_reward verification
+#
+# 9. **System Prompt**:
+#    - Instructs <think>/<answer> structure
+#    - Reinforces SFT learning
+#    - Uses <answer> tag (different from SFT)
+#
+# 10. **Hardware Requirements**:
+#     - Flexible (1.5B model is small)
+#     - Can run on 1-2 GPUs
+#     - BF16 + Flash Attention + Liger kernel
+#
+# 11. **Integration Points**:
+#     - Input: DeepSeek-R1-Distill-Qwen-1.5B (SFT checkpoint)
+#     - Dataset: OpenR1-Math-220k (math problems)
+#     - Output: GRPO checkpoint on Hub
+#     - Next: Evaluation on MATH, AIME, GPQA
+#
+# 12. **Comparison to SFT**:
+#     - Lower LR (1e-6 vs 4e-5)
+#     - Higher batch size (16 vs 2)
+#     - Shorter sequences (2048 vs 32768)
+#     - More warmup (10% vs 3%)
+#     - Fewer epochs (1 vs 5)
+#
+# ==============================================================================
